@@ -1,14 +1,13 @@
-from serial import Serial, EIGHTBITS, PARITY_NONE, STOPBITS_ONE
+import time
+import msgpack
+import struct
 from binascii import crc32
 
 
+# constants:
+SLICE_MESSAGE_BODY = slice(1, -1)
 HDLC_FLAG = 0x7e
 HDLC_ESCAPE = 0x7d
-
-"""
-Packet definition:
-<HDLC_FLAG_BYTE
-"""
 
 def escape_hdlc_flag_bytes(message):
     """Returns list of integers of escaped message
@@ -24,17 +23,17 @@ def escape_hdlc_flag_bytes(message):
         A list of integers representing the escaped bytes.
 
     """
-        escaped = []
-        for b in message:
-            if (b == HDLC_FLAG or
-                b == HDLC_ESCAPE):
-                escaped.append(HDLC_ESCAPE)
-                escaped.append(b ^ 0x20)
-            else:
-                escaped.append(b)
-        return escaped
+    escaped = []
+    for b in message:
+        if (b == HDLC_FLAG or
+            b == HDLC_ESCAPE):
+            escaped.append(HDLC_ESCAPE)
+            escaped.append(b ^ 0x20)
+        else:
+            escaped.append(b)
+    return escaped
 
-def unescape_hdlc_flag_bythes(escaped):
+def unescape_hdlc_flag_bytes(escaped):
     """Returns unescaped list of integers of escaped message
     suitable for hdlc packaging.
     Parameters
@@ -61,18 +60,91 @@ def unescape_hdlc_flag_bythes(escaped):
     return message
 
 
-class SimpleHDLC(obj):
+class SimpleHDLC(object):
 
-    def __init__(self, com, client_id=None):
+    """
+    Packet definition:
+    <HDLC_FLAG><Address><Control><Message Data><Frame Checksum><HDLC_FLAG>
+
+    Overhead:
+    This Protocol adds 10 bytes overhead to the data transmitted.
+
+    """
+
+    def __init__(self, com, only_crc_msg=True):
         self._com = com
-        self._client_id = client_id
+        self._only_crc_msg = only_crc_msg
+        self._raw_message_read = None
+        self._raw_message_read = None
+        self._crc_approoved = False
 
-    def read(self):
+    @property
+    def crc_approoved(self):
+        return self._crc_approoved
+
+    @property
+
+    def _pack_message(self, message):
+        return msgpack.packb(message)
+
+    def _unpack_message(self, message):
+        return msgpack.unpackb(message)
+
+    def _escape(self, message):
+        return escape_hdlc_flag_bytes(message)
+
+    def _unescape(self, message):
+        return unescape_hdlc_flag_bytes(message)
+
+    def _read_byte(self):
+        return struct.unpack('B', self._com.read(1))[0]
+
+    def _read_message(self):
+        """Returns message including HDLC_FLAG read from self._com"""
         message = []
-        data = self.read(1)
-        while data != HDLC_FLAG
 
-            message.append(self._com.read(1)
+        b = self._read_byte()
+        if b != HDLC_FLAG:
+            while b != HDLC_FLAG:
+                b = self._read_byte()
+
+        message.append(b)
+
+        b = self._read_byte()
+        while b == HDLC_FLAG:
+            b = self._read_byte()
+
+        message.append(b)
+
+        while b != HDLC_FLAG:
+            b = self._read_byte()
+            message.append(b)
+
+        self._raw_message_read = message
+        return message
+
+    def read(self, timeout=False):
+        if timeout is not False:
+            self._com.setTimeout(timeout)
+
+        message = self._read_message()
+        message_bytes = bytes(self._unescape(message))
+        message, self._crc_recieved = self._unpack_message(message_bytes[SLICE_MESSAGE_BODY])
+        self._crc_message = crc32(message)
+        self._crc_approoved = (self._crc_recieved == self._crc_message)
+
+        can_be_returned = ((self._only_crc_msg and self._crc_approoved)
+                           or (not self._only_crc_msg))
+        if can_be_returned:
+            return  self._unpack_message(message)
+        else:
+            return None
 
     def write(self, message):
-        pass
+        if not isinstance(message, bytes):
+            message = self._pack_message(message)
+        message = self._pack_message((message, crc32(message)))
+        message = [HDLC_FLAG] + self._escape(message) + [HDLC_FLAG]
+        for b in message: self._com.write(
+                struct.pack('B', b))
+        self._raw_message_written = message
